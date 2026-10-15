@@ -1,0 +1,228 @@
+# Solar Smart Irrigation Controller - ESP32 MicroPython (Wokwi)
+#
+# Soil pot  (GPIO34): right = wet, left = dry
+# Battery pot (GPIO35): right = full, left = empty
+# DHT22 (GPIO15), Relay (GPIO26) -> green LED (pump)
+# Red LED (GPIO25) = low battery, Button (GPIO13) = manual override
+# LCD 16x2 I2C: SDA 21, SCL 22 (address 0x27)
+
+from machine import Pin, ADC, I2C
+import dht
+import time
+
+# ---------------- Pins ----------------
+PIN_SOIL, PIN_BATT, PIN_DHT = 34, 35, 15
+PIN_RELAY, PIN_LED_LOW, PIN_BTN = 26, 25, 13
+RELAY_ON, RELAY_OFF = 1, 0          # swap if your relay is active-low
+
+# ---------------- Settings ----------------
+DRY_ON_PCT = 35        # pump starts below this soil moisture
+WET_OFF_PCT = 60       # pump stops at/above this soil moisture
+BAT_LOW_PCT = 20       # lock pump below this battery level
+BAT_OK_PCT = 30        # unlock pump above this battery level
+MAX_RUN_MS = 60000     # safety: max continuous pump run
+COOLDOWN_MS = 20000    # rest after a safety stop
+SENSE_MS = 500
+DHT_MS = 2000
+LOG_MS = 2000
+DEBOUNCE_MS = 50
+
+# ---------------- Hardware ----------------
+soil_adc = ADC(Pin(PIN_SOIL))
+soil_adc.atten(ADC.ATTN_11DB)
+batt_adc = ADC(Pin(PIN_BATT))
+batt_adc.atten(ADC.ATTN_11DB)
+
+relay = Pin(PIN_RELAY, Pin.OUT)
+led_low = Pin(PIN_LED_LOW, Pin.OUT)
+btn = Pin(PIN_BTN, Pin.IN, Pin.PULL_UP)
+sensor = dht.DHT22(Pin(PIN_DHT))
+
+relay.value(RELAY_OFF)
+led_low.value(0)
+
+
+# ---------------- Minimal I2C LCD driver (PCF8574 backpack) ----------------
+class LCD:
+    def __init__(self, i2c, addr=0x27):
+        self.i2c = i2c
+        self.addr = addr
+        self.bl = 0x08
+        time.sleep_ms(50)
+        for _ in range(3):
+            self._pulse(0x30)
+            time.sleep_ms(5)
+        self._pulse(0x20)          # switch to 4-bit mode
+        time.sleep_ms(5)
+        self.cmd(0x28)             # 2 lines, 5x8 font
+        self.cmd(0x0C)             # display on, cursor off
+        self.cmd(0x06)             # entry mode
+        self.clear()
+
+    def _pulse(self, data):
+        self.i2c.writeto(self.addr, bytes([data | 0x04 | self.bl]))
+        time.sleep_us(2)
+        self.i2c.writeto(self.addr, bytes([(data & ~0x04) | self.bl]))
+        time.sleep_us(60)
+
+    def _send(self, val, rs):
+        self._pulse((val & 0xF0) | rs)
+        self._pulse(((val << 4) & 0xF0) | rs)
+
+    def cmd(self, c):
+        self._send(c, 0)
+
+    def clear(self):
+        self.cmd(0x01)
+        time.sleep_ms(3)
+
+    def put(self, row, text):
+        self.cmd(0x80 | (0x00 if row == 0 else 0x40))
+        text = (text + " " * 16)[:16]
+        for ch in text:
+            self._send(ord(ch), 1)
+
+
+i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=100000)
+lcd = LCD(i2c, 0x27)
+
+
+# ---------------- Helpers ----------------
+def read_percent(adc):
+    total = 0
+    for _ in range(10):
+        total += adc.read()        # 0..4095
+        time.sleep_ms(2)
+    raw = total // 10
+    pct = raw * 100 // 4095
+    return max(0, min(100, pct))
+
+
+def main():
+    pump_on = False
+    manual = False
+    low_bat = False
+    cooldown = False
+    timeout_stop = False
+    pump_start = 0
+    pump_stop = 0
+    temp = None
+    hum = None
+
+    btn_stable = 1
+    btn_last = 1
+    btn_change = 0
+
+    lcd.put(0, "Solar Smart")
+    lcd.put(1, "Irrigation Ctrl")
+    time.sleep_ms(1500)
+    lcd.clear()
+    print("Solar Smart Irrigation Controller started")
+    print("Turn the soil potentiometer to simulate dry/wet soil.")
+
+    now = time.ticks_ms()
+    last_sense = time.ticks_add(now, -SENSE_MS)   # run control immediately
+    last_dht = time.ticks_add(now, -DHT_MS)
+    last_log = now
+    soil = 0
+    batt = 0
+
+    while True:
+        now = time.ticks_ms()
+
+        # ----- Button (debounced, toggles manual override) -----
+        reading = btn.value()
+        if reading != btn_last:
+            btn_change = now
+            btn_last = reading
+        if time.ticks_diff(now, btn_change) > DEBOUNCE_MS and reading != btn_stable:
+            btn_stable = reading
+            if btn_stable == 0:                    # pressed
+                manual = not manual
+                last_sense = time.ticks_add(now, -SENSE_MS)
+                print("[BTN] Manual pump ON requested" if manual
+                      else "[BTN] Manual override cancelled")
+
+        # ----- DHT22 (every 2 s) -----
+        if time.ticks_diff(now, last_dht) >= DHT_MS:
+            last_dht = now
+            try:
+                sensor.measure()
+                temp = sensor.temperature()
+                hum = sensor.humidity()
+            except OSError:
+                pass
+
+        # ----- Sense + control + display -----
+        if time.ticks_diff(now, last_sense) >= SENSE_MS:
+            last_sense = now
+            soil = read_percent(soil_adc)
+            batt = read_percent(batt_adc)
+
+            # battery lockout with hysteresis
+            if batt <= BAT_LOW_PCT:
+                low_bat = True
+            elif batt >= BAT_OK_PCT:
+                low_bat = False
+            led_low.value(1 if low_bat else 0)
+
+            # cooldown expiry
+            if cooldown and time.ticks_diff(now, pump_stop) >= COOLDOWN_MS:
+                cooldown = False
+
+            want = pump_on
+            if low_bat:
+                want = False
+                manual = False
+            elif manual:
+                want = True
+            else:
+                if not pump_on:
+                    if soil < DRY_ON_PCT and not cooldown:
+                        want = True
+                else:
+                    if soil >= WET_OFF_PCT:
+                        want = False
+
+            # safety: max continuous run time
+            if pump_on and want and time.ticks_diff(now, pump_start) >= MAX_RUN_MS:
+                want = False
+                manual = False
+                cooldown = True
+                timeout_stop = True
+
+            if want != pump_on:
+                pump_on = want
+                relay.value(RELAY_ON if pump_on else RELAY_OFF)
+                if pump_on:
+                    pump_start = now
+                    timeout_stop = False
+                else:
+                    pump_stop = now
+
+            if low_bat:
+                mode = "LOWB"
+            elif manual:
+                mode = "MAN"
+            elif cooldown:
+                mode = "WAIT"
+            else:
+                mode = "AUTO"
+
+            t_txt = "--" if temp is None else "%2d" % int(temp)
+            lcd.put(0, "Soil:%3d%% T:%sC" % (soil, t_txt))
+            lcd.put(1, "B:%3d%% %-3s %-4s" % (batt, "ON" if pump_on else "OFF", mode))
+
+        # ----- Serial log -----
+        if time.ticks_diff(now, last_log) >= LOG_MS:
+            last_log = now
+            t_s = "--" if temp is None else "%.1f" % temp
+            h_s = "--" if hum is None else "%.0f" % hum
+            extra = " (max-run safety stop)" if timeout_stop else ""
+            print("Soil=%d%% Batt=%d%% Temp=%sC Hum=%s%% Pump=%s Mode=%s%s" % (
+                soil, batt, t_s, h_s, "ON" if pump_on else "OFF", mode, extra))
+
+        time.sleep_ms(10)
+
+
+main()
