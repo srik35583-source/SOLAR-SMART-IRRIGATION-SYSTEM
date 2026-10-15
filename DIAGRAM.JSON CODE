@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "author": "Sri kanth S",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot1", "top": -130, "left": -150, "attrs": {} },
+    { "type": "wokwi-potentiometer", "id": "pot2", "top": -130, "left": -30, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -140, "left": 110, "attrs": {} },
+    { "type": "wokwi-relay-module", "id": "relay1", "top": 230, "left": -140, "attrs": {} },
+    { "type": "wokwi-resistor", "id": "r1", "top": 270, "left": 40, "attrs": { "value": "330" } },
+    { "type": "wokwi-led", "id": "led1", "top": 330, "left": 120, "attrs": { "color": "green" } },
+    { "type": "wokwi-resistor", "id": "r2", "top": 330, "left": 200, "attrs": { "value": "330" } },
+    { "type": "wokwi-led", "id": "led2", "top": 400, "left": 260, "attrs": { "color": "red" } },
+    { "type": "wokwi-lcd1602", "id": "lcd1", "top": -250, "left": 280, "attrs": { "pins": "i2c" } },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 130, "left": -190, "attrs": { "color": "blue" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+
+    [ "pot1:VCC", "esp:3V3", "red", [] ],
+    [ "pot1:GND", "esp:GND.1", "black", [] ],
+    [ "pot1:SIG", "esp:34", "green", [] ],
+
+    [ "pot2:VCC", "esp:3V3", "red", [] ],
+    [ "pot2:GND", "esp:GND.1", "black", [] ],
+    [ "pot2:SIG", "esp:35", "orange", [] ],
+
+    [ "dht1:VCC", "esp:3V3", "red", [] ],
+    [ "dht1:GND", "esp:GND.1", "black", [] ],
+    [ "dht1:SDA", "esp:15", "yellow", [] ],
+
+    [ "relay1:VCC", "esp:5V", "red", [] ],
+    [ "relay1:GND", "esp:GND.1", "black", [] ],
+    [ "relay1:IN", "esp:26", "blue", [] ],
+    [ "relay1:COM", "esp:5V", "red", [] ],
+    [ "relay1:NO", "r1:1", "green", [] ],
+    [ "r1:2", "led1:A", "green", [] ],
+    [ "led1:C", "esp:GND.2", "black", [] ],
+
+    [ "esp:25", "r2:1", "red", [] ],
+    [ "r2:2", "led2:A", "red", [] ],
+    [ "led2:C", "esp:GND.2", "black", [] ],
+
+    [ "lcd1:GND", "esp:GND.2", "black", [] ],
+    [ "lcd1:VCC", "esp:5V", "red", [] ],
+    [ "lcd1:SDA", "esp:21", "green", [] ],
+    [ "lcd1:SCL", "esp:22", "purple", [] ],
+
+    [ "btn1:1.l", "esp:13", "blue", [] ],
+    [ "btn1:2.l", "esp:GND.1", "black", [] ]
+  ],
+  "dependencies": {}
+}
